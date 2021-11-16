@@ -1,0 +1,235 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+•	Response variable:  Retailprice (quantitative)
+•	Methods:  Robust regression and Elastic net
+
+
+```{r, message=FALSE}
+
+# Load in necessary packages
+
+library(dplyr)
+library(caret)
+library(ggformula)
+library(glmnet)
+library(corrplot)
+library(RColorBrewer)
+library(ggplot2)
+library(GGally)
+library(mice)
+library(plotmo)
+library(ggplot2)
+library(ggpubr)
+
+```
+
+```{r}
+##### DATA PREP #####
+
+# Load in, observe, and clean data set
+
+cars = read.csv("04cars.csv")
+
+hist(cars$Engine)
+hist(cars$Horsepower)
+hist(cars$CityMPG)
+hist(cars$HwyMPG)
+hist(cars$Weight)
+hist(cars$Wheelbase)
+hist(cars$Length)
+
+mycars <- na.omit(cars) # Removing NA's; Many in height column, but okay based on its correlation with weight and wheelbase
+
+mycars <- mycars %>%
+  mutate(Height = as.numeric(Height))
+
+# Horsepower = log(Horsepower), HwyMPG = log(HwyMPG), CityMPG = log(CityMPG) - reduced accuracy of model prediction
+
+summary(mycars)
+dim(mycars)
+n = dim(mycars)[1]
+
+```
+
+
+```{r}
+###################################################################
+##### Double cross-validation for modeling-process assessment ##### 
+###################################################################
+
+##### model assessment OUTER shell #####
+# produce loops for 5-fold cross-validation for model ASSESSMENT
+nfolds = 5
+groups = rep(1:nfolds,length=n) #produces list of group labels
+set.seed(11)
+cvgroups = sample(groups,n) #orders randomly
+
+# set up storage for predicted values from the double-cross-validation
+allpredictedCV = rep(NA,n)
+# set up storage to see what models are "best" on the inner loops
+allbestTypes = rep(NA,nfolds)
+allbestPars = vector("list",nfolds)
+
+# ENET Parameters
+allalpha <- c(1:9)/10
+alllambda = exp((0:100)/10)
+
+# loop through outer splits
+for (j in 1:nfolds) { 
+ groupj = (cvgroups == j)
+ traindata = mycars[!groupj,]
+ trainx = model.matrix(Retailprice ~ ., data = traindata)[,-1]
+ trainy = traindata$Retailprice
+ validdata = mycars[groupj,]
+ validx = model.matrix(Retailprice ~ ., data = validdata)[,-1]
+ validy = validdata$Retailprice
+
+ #specify data to be used
+ dataused=traindata
+
+ # 10-fold Cross Validation via Caret
+
+ # Training method
+ set.seed(11)
+ training = trainControl(method = "cv", number = 10)
+
+ # cv for ENET
+
+ fit_caret_enet = train(Retailprice ~ . - Height, data = dataused, method = "glmnet", trControl = training, tuneGrid = expand.grid(alpha = allalpha, lambda = alllambda))
+
+ # cv for Robust Regression
+ 
+ fit_caret_rlm = train(Retailprice ~ . - Type - SUV - Pickup - Wagon - Sport - Minivan - Height, data = dataused, method = "rlm", trControl = training)
+ 
+ # All Best
+
+ all_best_type = c("ENET", "RLM")
+ all_best_pars = list(fit_caret_enet$bestTune, fit_caret_rlm$bestTune) 
+ all_best_models = list(fit_caret_enet$finalModel, fit_caret_rlm$finalModel)
+ all_best_RMSE = c(min(fit_caret_enet$results$RMSE),min(fit_caret_rlm$results$RMSE))
+
+ # One Best
+
+ one_best_Type = all_best_type[which.min(all_best_RMSE)]
+ one_best_Pars = all_best_pars[which.min(all_best_RMSE)]
+ one_best_Model = all_best_models[[which.min(all_best_RMSE)]]
+
+ ##### END OF INNER MODEL SELECTION #####
+
+ allbestTypes[j] = one_best_Type
+ allbestPars[[j]] = one_best_Pars
+
+ if (one_best_Type == "ENET") { 
+  ENETlambda = one_best_Pars[[1]]$lambda
+  allpredictedCV[groupj] = predict(fit_caret_enet, newdata=validdata,s=ENETlambda)
+ } else if (one_best_Type == "RLM") { 
+  allpredictedCV[groupj] = predict(fit_caret_rlm,validdata)
+ }
+}
+
+# Which models are "best" on each of the inner splits
+allbestTypes
+allbestPars
+```
+
+
+```{r}
+# print individually
+for (j in 1:nfolds) {
+ writemodel = paste("The best model at loop", j,"is of type", allbestTypes[j],"with parameter(s)",allbestPars[j])
+ print(writemodel, quote = FALSE)
+}
+```
+
+
+```{r}
+# plotting predicted values against response variable
+plot(allpredictedCV, mycars$Retailprice)
+line <- c(0,1)
+abline(line, col="red")
+```
+
+
+```{r}
+#assessment
+y = mycars$Retailprice
+RMSE = sqrt(mean(allpredictedCV-y)^2); RMSE
+R2 = 1-sum((y-allpredictedCV)^2)/sum((y-mean(y))^2); R2
+
+# about 70.6% of the variability in Retailprice values is 
+# explained by this model-fitting process
+```
+
+```{r}
+# ENET with Alpha = 0.1, Lambda = 90.0171313005218
+#alldatafit <- predict(fit_caret_enet$finalModel)
+
+x = model.matrix(Retailprice~.,data=mycars)[,-1]
+y = mycars$Retailprice
+                      
+ENETfit = glmnet(x, y, alpha = 0.1,lambda=alllambda)
+plot_glmnet(ENETfit, xvar = "lambda")
+ENETlambdaused = 90.017; abline(v=log(ENETlambdaused))
+ENETcoef = coef(ENETfit,s=ENETlambdaused); ENETcoef
+ENETcoef=round(ENETcoef[,1],6)                 
+
+
+#furthest from 0 seem to be the most significant, but we need to be careful because our variables are not scaled and variables with higher averages tend to have higher coefficients - bootstrapping could be used to calculate confidence intervals for more accurate depiction
+```
+
+
+
+
+```{r}
+# Visually comparing response and predictor variables
+
+Engine <- mycars %>%
+  gf_point(Retailprice ~ Engine) %>%
+  gf_smooth(Retailprice ~ Engine) %>%
+  gf_labs(title = "Retail Price by Engine Volume")
+
+Wheelbase <- mycars %>%
+  gf_point(Retailprice ~ Wheelbase) %>%
+  gf_smooth(Retailprice ~ Wheelbase) %>%
+  gf_labs(title = "Retail Price by Wheelbase")
+
+MPG <- mycars %>%
+  gf_point(Retailprice ~ HwyMPG) %>%
+  gf_smooth(Retailprice ~ HwyMPG) %>%
+  gf_labs(title = "Retail Price by Highway MPG")
+
+Cylinders <- mycars %>%
+  gf_point(Retailprice ~ Cylinders) %>%
+  gf_smooth(Retailprice ~ Cylinders) %>%
+  gf_labs(title = "Retail Price by Engine Size")
+
+figure <- ggarrange(Engine, Cylinders, Wheelbase, MPG, 
+                    labels = c("A", "B", "C", "D"),
+                    ncol = 2, nrow = 2)
+figure
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
